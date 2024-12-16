@@ -1,5 +1,6 @@
 streamlit
 numpy
 requests
-opencv-python==4.5.5.64
+opencv-python-headless
+
 
