@@ -1,4 +1,5 @@
 import streamlit as st
+import base64
 from datetime import datetime
 
 # Initialize session state
@@ -6,11 +7,8 @@ if 'profiles' not in st.session_state:
     st.session_state.profiles = {}
 if 'current_user' not in st.session_state:
     st.session_state.current_user = None
-if 'auth_method' not in st.session_state:
-    st.session_state.auth_method = None
 
 def get_fingerprint_component():
-    """Returns HTML/JS for fingerprint authentication - NO .format() used"""
     return """
     <div id="auth-container" style="text-align: center; padding: 20px;">
         <button id="auth-btn" style="padding: 12px 24px; font-size: 16px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">
@@ -36,39 +34,50 @@ def get_fingerprint_component():
             const challenge = new Uint8Array(32);
             window.crypto.getRandomValues(challenge);
             
-            const publicKey = {
-                challenge: challenge,
-                rp: { name: "ProfileAuth" },
-                user: {
-                    id: new TextEncoder().encode("user_" + Date.now()),
-                    name: "user@example.com",
-                    displayName: "User"
-                },
-                pubKeyCredParams: [{ alg: -7, type: "public-key" }],
-                timeout: 60000,
-                authenticatorSelection: {
-                    authenticatorAttachment: "platform",
-                    userVerification: "required"
-                }
-            };
-            
-            const isRegistration = "ACTION_PLACEHOLDER" === "register";
+            const ACTION = "ACTION_PLACEHOLDER";
             let result;
             
-            if (isRegistration) {
-                const credential = await navigator.credentials.create({ publicKey });
-                result = {
-                    success: true,
-                    action: "register"
-                };
-            } else {
-                const assertion = await navigator.credentials.get({ 
-                    publicKey: {
-                        challenge: challenge,
-                        timeout: 60000,
+            if (ACTION === "register") {
+                const publicKey = {
+                    challenge: challenge,
+                    rp: { name: "ProfileAuth" },
+                    user: {
+                        id: new TextEncoder().encode("user_" + Date.now()),
+                        name: "user@example.com",
+                        displayName: "User"
+                    },
+                    pubKeyCredParams: [{ alg: -7, type: "public-key" }],
+                    timeout: 60000,
+                    authenticatorSelection: {
+                        authenticatorAttachment: "platform",
                         userVerification: "required"
                     }
-                });
+                };
+                
+                const credential = await navigator.credentials.create({ publicKey });
+                const credentialId = Array.from(new Uint8Array(credential.rawId));
+                
+                result = {
+                    success: true,
+                    action: "register",
+                    credentialId: credentialId
+                };
+            } else if (ACTION === "login") {
+                // Get allowed credential IDs from Python
+                const allowedCreds = CREDENTIALS_PLACEHOLDER;
+                const allowCredentials = allowedCreds.map(id => ({
+                    id: new Uint8Array(id).buffer,
+                    type: "public-key"
+                }));
+                
+                const publicKey = {
+                    challenge: challenge,
+                    timeout: 60000,
+                    userVerification: "required",
+                    allowCredentials: allowCredentials
+                };
+                
+                const assertion = await navigator.credentials.get({ publicKey });
                 result = {
                     success: true,
                     action: "login"
@@ -96,7 +105,6 @@ def get_fingerprint_component():
     """
 
 def get_pin_component():
-    """Returns HTML/JS for PIN input - NO .format() used"""
     return """
     <div id="pin-container" style="text-align: center; padding: 20px;">
         <input type="password" id="pin-input" placeholder="Enter 4-digit PIN" maxlength="4" 
@@ -134,31 +142,35 @@ def get_pin_component():
     </script>
     """
 
-def create_profile(username, method, pin=None):
-    """Create new user profile"""
+def create_profile(username, method, credential_id=None, pin=None):
     profile_data = {
         'method': method,
         'created': datetime.now().isoformat()
     }
+    if credential_id:
+        # Store as base64 for safe JSON serialization
+        profile_data['credential_id'] = base64.b64encode(bytes(credential_id)).decode('utf-8')
     if pin:
-        # In production: hash the PIN! (for demo, store as-is in session)
-        profile_data['pin'] = pin
+        profile_data['pin'] = pin  # In production: hash this!
     
     st.session_state.profiles[username] = profile_data
-    st.session_state.current_user = username
-    st.session_state.auth_method = method
+
+def get_credential_id(username):
+    """Get decoded credential ID for a user"""
+    cred_b64 = st.session_state.profiles[username].get('credential_id')
+    if cred_b64:
+        return list(base64.b64decode(cred_b64))
+    return None
 
 def verify_pin(username, pin):
-    """Verify PIN for existing user"""
     if username in st.session_state.profiles:
         return st.session_state.profiles[username].get('pin') == pin
     return False
 
 def main():
-    st.set_page_config(page_title="Biometric Profile Auth", layout="centered")
-    st.title("🔐 Biometric Profile Authentication")
+    st.set_page_config(page_title="Profile-Specific Fingerprint Auth", layout="centered")
+    st.title("🔐 Profile-Specific Biometric Auth")
     
-    # Device selection
     device_support = st.radio(
         "Select your device:",
         ["📱 Smartphone/Tablet (with fingerprint)", "💻 Computer (without fingerprint)"],
@@ -169,11 +181,10 @@ def main():
     
     if st.session_state.current_user:
         st.success(f"✅ Welcome, **{st.session_state.current_user}**!")
-        st.write(f"Authenticated via: **{st.session_state.auth_method}**")
+        st.write(f"Authenticated via: **{st.session_state.profiles[st.session_state.current_user]['method']}**")
         
         if st.button("🚪 Logout"):
             st.session_state.current_user = None
-            st.session_state.auth_method = None
             st.rerun()
     else:
         tab1, tab2 = st.tabs(["🆕 Create Profile", "🚪 Login"])
@@ -187,24 +198,21 @@ def main():
                     st.error("Username already exists!")
                 else:
                     if has_fingerprint:
-                        st.info("Touch your fingerprint sensor to register")
+                        st.info("Register your fingerprint for this profile")
                         html_code = get_fingerprint_component()
-                        html_code = html_code.replace("BUTTON_TEXT_PLACEHOLDER", "Register with Fingerprint")
+                        html_code = html_code.replace("BUTTON_TEXT_PLACEHOLDER", "Register Fingerprint")
                         html_code = html_code.replace("ACTION_PLACEHOLDER", "register")
                         result = st.components.v1.html(html_code, height=150)
                         
                         if result and isinstance(result, dict):
-                            if result.get('success'):
-                                create_profile(new_username, "Fingerprint")
-                                st.success("Profile created!")
+                            if result.get('success') and 'credentialId' in result:
+                                create_profile(new_username, "Fingerprint", result['credentialId'])
+                                st.success("✅ Profile created! Fingerprint registered.")
                                 st.rerun()
                             elif 'error' in result:
-                                if result['error'] == 'no_webauthn':
-                                    st.warning("Fingerprint not supported. Use a computer to create a PIN profile.")
-                                else:
-                                    st.error(f"Error: {result['error']}")
+                                st.error(f"Registration failed: {result['error']}")
                     else:
-                        st.info("Create a 4-digit PIN")
+                        st.info("Create a 4-digit PIN for this profile")
                         html_code = get_pin_component()
                         html_code = html_code.replace("ACTION_PLACEHOLDER", "Create PIN")
                         html_code = html_code.replace("ACTION_TYPE_PLACEHOLDER", "create")
@@ -212,8 +220,8 @@ def main():
                         
                         if result and isinstance(result, dict):
                             if 'pin' in result and result.get('action') == 'create':
-                                create_profile(new_username, "PIN", result['pin'])
-                                st.success("Profile created with PIN!")
+                                create_profile(new_username, "PIN", pin=result['pin'])
+                                st.success("✅ Profile created with PIN!")
                                 st.rerun()
         
         with tab2:
@@ -222,7 +230,7 @@ def main():
                 st.info("No profiles exist. Create one first!")
             else:
                 existing_user = st.selectbox(
-                    "Select your username", 
+                    "Select your profile", 
                     options=list(st.session_state.profiles.keys()),
                     key="existing_user"
                 )
@@ -231,23 +239,30 @@ def main():
                     user_method = st.session_state.profiles[existing_user]['method']
                     
                     if has_fingerprint and user_method == "Fingerprint":
-                        st.info("Verify your fingerprint")
-                        html_code = get_fingerprint_component()
-                        html_code = html_code.replace("BUTTON_TEXT_PLACEHOLDER", "Login with Fingerprint")
-                        html_code = html_code.replace("ACTION_PLACEHOLDER", "login")
-                        result = st.components.v1.html(html_code, height=150)
-                        
-                        if result and isinstance(result, dict):
-                            if result.get('success'):
-                                st.session_state.current_user = existing_user
-                                st.session_state.auth_method = "Fingerprint"
-                                st.success("Login successful!")
-                                st.rerun()
-                            elif 'error' in result:
-                                st.error(f"Login failed: {result['error']}")
+                        st.info(f"Authenticate with the fingerprint registered for **{existing_user}**")
+                        # Get credential ID for this profile
+                        cred_id = get_credential_id(existing_user)
+                        if cred_id:
+                            html_code = get_fingerprint_component()
+                            html_code = html_code.replace("BUTTON_TEXT_PLACEHOLDER", "Login with Fingerprint")
+                            html_code = html_code.replace("ACTION_PLACEHOLDER", "login")
+                            # Inject allowed credentials as JS array
+                            creds_js = f"const CREDENTIALS_PLACEHOLDER = [{cred_id}];"
+                            html_code = creds_js + html_code
+                            result = st.components.v1.html(html_code, height=180)
+                            
+                            if result and isinstance(result, dict):
+                                if result.get('success'):
+                                    st.session_state.current_user = existing_user
+                                    st.success("✅ Login successful!")
+                                    st.rerun()
+                                elif 'error' in result:
+                                    st.error(f"Login failed: {result['error']}")
+                        else:
+                            st.error("No fingerprint registered for this profile!")
                     
                     else:
-                        st.info("Enter your PIN")
+                        st.info(f"Enter PIN for **{existing_user}**")
                         html_code = get_pin_component()
                         html_code = html_code.replace("ACTION_PLACEHOLDER", "Login with PIN")
                         html_code = html_code.replace("ACTION_TYPE_PLACEHOLDER", "login")
@@ -257,11 +272,10 @@ def main():
                             if 'pin' in result and result.get('action') == 'login':
                                 if verify_pin(existing_user, result['pin']):
                                     st.session_state.current_user = existing_user
-                                    st.session_state.auth_method = "PIN"
-                                    st.success("Login successful!")
+                                    st.success("✅ Login successful!")
                                     st.rerun()
                                 else:
-                                    st.error("Invalid PIN!")
+                                    st.error("❌ Invalid PIN!")
 
 if __name__ == "__main__":
     main()
