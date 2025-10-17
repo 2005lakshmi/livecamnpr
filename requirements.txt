@@ -1,4 +1,7 @@
 streamlit>=1.28.0
-deepface
+tensorflow<2.16.0
+keras<3.0.0
+deepface==0.0.89
 opencv-python-headless
+numpy
 Pillow
