@@ -1,7 +1,4 @@
 streamlit>=1.28.0
+deepface
 opencv-python-headless
-numpy
 Pillow
-cmake  # Keep this, as it might be needed for the build process even if we hope to use a wheel
-https://files.pythonhosted.org/packages/.../dlib-19.22.99-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl  # Example placeholder - you need to find the actual URL
-face-recognition
