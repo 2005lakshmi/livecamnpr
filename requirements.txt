@@ -3,5 +3,5 @@ opencv-python-headless
 numpy
 Pillow
 cmake
-dlib
+dlib==19.24.0
 face-recognition
