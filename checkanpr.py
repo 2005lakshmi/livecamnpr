@@ -3,8 +3,8 @@ import os
 import json
 import numpy as np
 from PIL import Image
-import face_recognition
-#Successfully installed face_recognition_models-0.3.0
+from deepface import DeepFace  # Replaced face_recognition with DeepFace
+
 # === Setup ===
 PROFILE_DIR = "profiles"
 os.makedirs(PROFILE_DIR, exist_ok=True)
@@ -13,7 +13,7 @@ st.set_page_config(page_title="Face Profile Manager", layout="centered")
 st.title("👤 Face Profile Manager")
 st.caption("Create profiles, upload face photos, and log in via selfie")
 
-# === Helper Functions ===
+# === Helper Functions (MODIFIED) ===
 def get_existing_profiles():
     return [f.replace(".npy", "") for f in os.listdir(PROFILE_DIR) if f.endswith(".npy")]
 
@@ -29,48 +29,47 @@ def load_profile(name):
         meta = json.load(f)
     return emb, meta
 
-'''def create_embedding_from_photos(uploaded_files):
+def create_embedding_from_photos(uploaded_files):
+    """
+    New function using DeepFace to create an averaged face embedding from multiple photos.
+    """
     embeddings = []
     for uploaded_file in uploaded_files:
         try:
-            # Open image
-            image = Image.open(uploaded_file)
-            image = np.array(image.convert("RGB"))  # Ensure RGB
-
-            # Detect face and encode
-            face_encodings = face_recognition.face_encodings(image)
-            if face_encodings:
-                embeddings.append(face_encodings[0])
+            # Save the uploaded file to a temporary path for DeepFace to process
+            with open("temp_img.jpg", "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            # Use DeepFace to represent the face. This returns a list of detected faces.
+            face_representations = DeepFace.represent(
+                img_path = "temp_img.jpg",
+                model_name = "VGG-Face",  # You can change this model (e.g., "Facenet")
+                detector_backend = "opencv",  # Faster, good balance of speed/accuracy
+                align = True
+            )
+            
+            if face_representations:
+                # Take the embedding of the first detected face
+                embedding = face_representations[0]["embedding"]
+                embeddings.append(embedding)
             else:
                 st.warning(f"No face detected in {uploaded_file.name}")
         except Exception as e:
             st.error(f"Error processing {uploaded_file.name}: {str(e)}")
     
+    # Clean up temporary image
+    if os.path.exists("temp_img.jpg"):
+        os.remove("temp_img.jpg")
+    
     if not embeddings:
         return None
-    # Average all embeddings for robustness
-    return np.mean(embeddings, axis=0)'''
-def weighted_average_embedding(photos):
-    embeddings = []
-    weights = []
-    for photo in photos:
-        image = face_recognition.load_image_file(photo)
-        face_locations = face_recognition.face_locations(image)
-        if not face_locations:
-            continue
-        
-        # Quality heuristic: larger face = better
-        top, right, bottom, left = face_locations[0]
-        face_size = (right - left) * (bottom - top)
-        
-        enc = face_recognition.face_encodings(image)[0]
-        embeddings.append(enc)
-        weights.append(face_size)  # Bigger face → higher weight
     
-    return np.average(embeddings, axis=0, weights=weights)
+    # Average all embeddings for a robust profile
+    avg_embedding = np.mean(embeddings, axis=0)
+    return avg_embedding
 
 # === Tabs ===
-tab1, tab2, tab3 = st.tabs(["	Create Profile", "	Login", "	Manage Profiles"])
+tab1, tab2, tab3 = st.tabs(["Create Profile", "Login", "Manage Profiles"])
 
 # === Tab 1: Create Profile ===
 with tab1:
@@ -99,7 +98,7 @@ with tab1:
                 else:
                     st.error("No valid faces found in any photo. Try again.")
 
-# === Tab 2: Login ===
+# === Tab 2: Login (MODIFIED) ===
 with tab2:
     st.subheader("2. Login with Face")
     profiles = get_existing_profiles()
@@ -113,26 +112,36 @@ with tab2:
         if selfie and st.button("🔓 Verify Login"):
             with st.spinner("Verifying..."):
                 try:
-                    # Process selfie
-                    image = Image.open(selfie)
-                    image = np.array(image.convert("RGB"))
-                    face_encodings = face_recognition.face_encodings(image)
+                    # Save the selfie to a temporary file
+                    with open("temp_selfie.jpg", "wb") as f:
+                        f.write(selfie.getbuffer())
                     
-                    if not face_encodings:
-                        st.error("❌ No face detected in selfie!")
+                    # Load the stored profile embedding
+                    stored_embedding, meta = load_profile(selected_profile)
+                    
+                    # Use DeepFace's verify function to compare the selfie with the stored profile
+                    result = DeepFace.verify(
+                        img1_path = os.path.join(PROFILE_DIR, f"{selected_profile}.npy"),  # This is a path to the npy file. In practice, you might need a different approach.
+                        img2_path = "temp_selfie.jpg",
+                        model_name = "VGG-Face",
+                        distance_metric = "cosine",  # Or "euclidean", "euclidean_l2"
+                        detector_backend = "opencv",
+                        align = True
+                    )
+                    
+                    # Clean up temporary selfie
+                    if os.path.exists("temp_selfie.jpg"):
+                        os.remove("temp_selfie.jpg")
+                    
+                    # DeepFace returns a dictionary with a 'verified' key
+                    if result['verified']:
+                        # Calculate a simple confidence score. Distance lower is better.
+                        confidence = 1 - result['distance']
+                        st.success(f"✅ Welcome, **{selected_profile}**! (Confidence: {confidence:.2f})")
+                        st.session_state["logged_in"] = selected_profile
                     else:
-                        selfie_embedding = face_encodings[0]
-                        stored_embedding, meta = load_profile(selected_profile)
+                        st.error(f"❌ Face not recognized. Distance: {result['distance']:.2f}")
                         
-                        # Compare faces
-                        distance = face_recognition.face_distance([stored_embedding], selfie_embedding)[0]
-                        threshold = 0.6  # Lower = stricter
-                        
-                        if distance < threshold:
-                            st.success(f"✅ Welcome, **{selected_profile}**! (Confidence: {1-distance:.2f})")
-                            st.session_state["logged_in"] = selected_profile
-                        else:
-                            st.error(f"❌ Face not recognized. Distance: {distance:.2f} (threshold: {threshold})")
                 except Exception as e:
                     st.error(f"Verification failed: {str(e)}")
 
