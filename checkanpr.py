@@ -1,15 +1,19 @@
-
-from deepface import DeepFace
-import tempfile
+import streamlit as st
 import os
-#Successfully installed face_recognition_models-0.3.0
+import json
+import numpy as np
+from PIL import Image
+from deepface import DeepFace
+from scipy.spatial.distance import cosine
+import tempfile
+
 # === Setup ===
 PROFILE_DIR = "profiles"
 os.makedirs(PROFILE_DIR, exist_ok=True)
 
 st.set_page_config(page_title="Face Profile Manager", layout="centered")
 st.title("👤 Face Profile Manager")
-st.caption("Create profiles, upload face photos, and log in via selfie")
+st.caption("Create profiles, upload face photos, and log in via selfie (powered by DeepFace)")
 
 # === Helper Functions ===
 def get_existing_profiles():
@@ -27,7 +31,6 @@ def load_profile(name):
         meta = json.load(f)
     return emb, meta
 
-
 def create_embedding_from_photos(uploaded_files):
     embeddings = []
     for uploaded_file in uploaded_files:
@@ -37,65 +40,55 @@ def create_embedding_from_photos(uploaded_files):
                 tmp.write(uploaded_file.getvalue())
                 tmp_path = tmp.name
 
-            # Extract embedding using Facenet (or VGG-Face)
+            # Use ArcFace (most accurate)
             embedding_objs = DeepFace.represent(
                 img_path=tmp_path,
-                model_name="Facenet",  # or "VGG-Face"
-                enforce_detection=True
+                model_name="ArcFace",
+                enforce_detection=True,
+                detector_backend="opencv"  # faster, no GPU needed
             )
             if embedding_objs:
                 embeddings.append(embedding_objs[0]["embedding"])
             else:
                 st.warning(f"No face detected in {uploaded_file.name}")
-            os.unlink(tmp_path)  # Clean up
+            os.unlink(tmp_path)
         except Exception as e:
             st.error(f"Error processing {uploaded_file.name}: {str(e)}")
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
     
     if not embeddings:
         return None
     return np.mean(embeddings, axis=0)
 
-def verify_face(selfie_bytes, stored_embedding):
+def verify_selfie(selfie_bytes, stored_embedding):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
         tmp.write(selfie_bytes)
         tmp_path = tmp.name
 
     try:
-        selfie_embedding = DeepFace.represent(
+        embedding_objs = DeepFace.represent(
             img_path=tmp_path,
-            model_name="Facenet",
-            enforce_detection=True
-        )[0]["embedding"]
+            model_name="ArcFace",
+            enforce_detection=True,
+            detector_backend="opencv"
+        )
+        if not embedding_objs:
+            os.unlink(tmp_path)
+            return None
+        selfie_embedding = np.array(embedding_objs[0]["embedding"])
         os.unlink(tmp_path)
     except:
-        os.unlink(tmp_path)
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
         return None
 
-    # Cosine similarity (DeepFace uses this by default)
-    from scipy.spatial.distance import cosine
+    # Cosine similarity (higher = more similar)
     similarity = 1 - cosine(stored_embedding, selfie_embedding)
-    return similarity  # Higher = more similar (0 to 1)
-def weighted_average_embedding(photos):
-    embeddings = []
-    weights = []
-    for photo in photos:
-        image = face_recognition.load_image_file(photo)
-        face_locations = face_recognition.face_locations(image)
-        if not face_locations:
-            continue
-        
-        # Quality heuristic: larger face = better
-        top, right, bottom, left = face_locations[0]
-        face_size = (right - left) * (bottom - top)
-        
-        enc = face_recognition.face_encodings(image)[0]
-        embeddings.append(enc)
-        weights.append(face_size)  # Bigger face → higher weight
-    
-    return np.average(embeddings, axis=0, weights=weights)
+    return similarity
 
 # === Tabs ===
-tab1, tab2, tab3 = st.tabs(["	Create Profile", "	Login", "	Manage Profiles"])
+tab1, tab2, tab3 = st.tabs(["Create Profile", "Login", "Manage Profiles"])
 
 # === Tab 1: Create Profile ===
 with tab1:
@@ -115,14 +108,14 @@ with tab1:
         elif not uploaded_files:
             st.error("Please upload at least one photo.")
         else:
-            with st.spinner("Processing photos..."):
+            with st.spinner("Processing photos with ArcFace... (first run may take 30s to download model)"):
                 embedding = create_embedding_from_photos(uploaded_files)
                 if embedding is not None:
                     save_profile(name, embedding, len(uploaded_files))
                     st.success(f"✅ Profile '{name}' created with {len(uploaded_files)} photos!")
                     st.balloons()
                 else:
-                    st.error("No valid faces found in any photo. Try again.")
+                    st.error("No valid faces found in any photo. Try again with clear, front-facing images.")
 
 # === Tab 2: Login ===
 with tab2:
@@ -135,24 +128,21 @@ with tab2:
         selected_profile = st.selectbox("Select your profile", profiles)
         selfie = st.camera_input("Take a selfie to verify")
         
-        # In Tab 2
         if selfie and st.button("🔓 Verify Login"):
-            with st.spinner("Verifying..."):
+            with st.spinner("Verifying with ArcFace..."):
                 selfie_bytes = selfie.getvalue()
                 stored_embedding, meta = load_profile(selected_profile)
-                similarity = verify_face(selfie_bytes, stored_embedding)
+                similarity = verify_selfie(selfie_bytes, stored_embedding)
                 
                 if similarity is None:
                     st.error("❌ No face detected in selfie!")
                 else:
-                    threshold = 0.7  # Adjust based on model (Facenet: 0.7 is good)
+                    threshold = 0.65  # ArcFace: 0.6–0.7 is good
                     if similarity > threshold:
-                        st.success(f"✅ Welcome, **{selected_profile}**! (Similarity: {similarity:.2f})")
+                        st.success(f"✅ Welcome, **{selected_profile}**! (Similarity: {similarity:.3f})")
                         st.session_state["logged_in"] = selected_profile
                     else:
-                        st.error(f"❌ Face not recognized. Similarity: {similarity:.2f} (threshold: {threshold})")
-                except Exception as e:
-                    st.error(f"Verification failed: {str(e)}")
+                        st.error(f"❌ Face not recognized. Similarity: {similarity:.3f} (threshold: {threshold})")
 
 # === Tab 3: Manage Profiles ===
 with tab3:
